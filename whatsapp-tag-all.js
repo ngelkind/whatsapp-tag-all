@@ -171,11 +171,11 @@
   window.__waEditor = ed;
 
   /* ---- 6. Harvest the node constructors + a template mention ---- */
-  let MNC = null, TC = null, tpl = null;
+  let MNC = null, TC = null;
   const scan = () => ed.getEditorState().read(() => {
     ed.getEditorState()._nodeMap.forEach(n => {
-      if (n.__type === 'mention' && !MNC) { MNC = Object.getPrototypeOf(n).constructor; tpl = n; }
-      if (n.__type === 'text'    && !TC)  { TC  = Object.getPrototypeOf(n).constructor; }
+      if (n.__type === 'mention' && !MNC) MNC = Object.getPrototypeOf(n).constructor;
+      if (n.__type === 'text'    && !TC)  TC  = Object.getPrototypeOf(n).constructor;
     });
   });
   scan();
@@ -240,10 +240,13 @@
     let cursor = lastMention.getWritable();
     for (const p of todo) {
       const sp = new TC(' ');
-      const mn = new MNC(tpl.name, tpl.wid, tpl.type || 'CONTACT');
-      mn.name   = p.name;
-      mn.wid    = p.lid;
-      mn.__text = '@' + p.name;
+      // The constructor takes ONE options object. Building the node this way
+      // is what populates `parsableText` (the zero-width-space-delimited wid
+      // that WhatsApp actually parses on send). Setting .name/.wid by hand
+      // afterwards does NOT — that produces mentions that render green but
+      // send as plain gray text.
+      const mn = new MNC({ name: p.name, wid: p.lid, type: 'CONTACT' });
+      mn.__text = '@' + p.name;   // visible label only
       cursor.insertAfter(sp);
       sp.insertAfter(mn);
       cursor = mn;
@@ -254,20 +257,38 @@
   await sleep(400);
 
   /* ---- 9. Verify ---- */
-  let count = 0;
+  /* A mention only sends as a real mention if getNodeMetadata() yields a
+     parsableText delimited by zero-width spaces and containing the wid.
+     Nodes that look green on screen but fail this check are the "gray text
+     on send" bug, so we verify every single one before handing it over. */
+  let count = 0, valid = 0, broken = 0;
   const wids = [];
   ed.getEditorState().read(() => {
     ed.getEditorState()._nodeMap.forEach(n => {
-      if (n.__type === 'mention') { count++; wids.push(n.wid); }
+      if (n.__type !== 'mention') return;
+      count++; wids.push(n.wid);
+      try {
+        const m = n.getNodeMetadata();
+        const pt = m && m.parsableText;
+        if (pt && pt.charCodeAt(0) === 0x200b &&
+            pt.includes(String(m.wid).split('@')[0])) valid++;
+        else broken++;
+      } catch (e) { broken++; }
     });
   });
   const domLen = input.innerText.length;
 
-  const ok = count === roster.length - (myId && roster.some(p => p.lid === myId) ? 1 : 0) && domLen > 0;
-  log(`RESULT — mentions: ${count} / roster ${roster.length} | compose length: ${domLen}`);
-  if (!domLen) warn('Compose box rendered empty — reload the page and rerun.');
-  else log('%cReady. Review the box, then press send YOURSELF. Nothing was sent.',
-           'color:#25d366;font-size:13px');
+  log(`RESULT — mentions: ${count} / roster ${roster.length} | verified: ${valid} | broken: ${broken} | length: ${domLen}`);
+
+  if (!domLen) {
+    warn('Compose box rendered empty — reload the page and rerun.');
+  } else if (broken) {
+    console.error(`[tagall] ${broken} mention(s) will send as plain gray text. ` +
+                  `Do NOT send. WhatsApp likely changed its mention node API.`);
+  } else {
+    log('%c✓ All mentions verified. Review the box, then press send YOURSELF. Nothing was sent.',
+        'color:#25d366;font-size:13px');
+  }
 
   window.__tagall = { group: groupTitle, groupId: group.id._serialized, detectedVia: how,
                       roster, mentions: count, wids, editor: ed };
